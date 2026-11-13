@@ -1,0 +1,8 @@
+{
+  "name": "Ollama Chat",
+  "description": "Minimalist AMOLED local AI chat interface for Ollama with custom personas and persona-coupled memory.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
