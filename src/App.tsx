@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MotionConfig } from 'motion/react';
-import { ChatArea } from './components/ChatArea';
+import { ChatArea, ChatAreaHandle } from './components/ChatArea';
 import { Header } from './components/Header';
 import { PersonaModal } from './components/PersonaModal';
 import { Sidebar } from './components/Sidebar';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import {
   exportAllConversationsAsJson,
   exportAllConversationsAsMarkdown,
   exportConversationAsJson,
   exportConversationAsMarkdown,
+  ImportedPersonaBundle,
 } from './services/export';
 import {
   fetchOllamaModels,
@@ -17,13 +19,21 @@ import {
   summarizeConversationMemory,
 } from './services/ollama';
 import {
+  fetchOpenRouterModels,
+  formatOpenRouterError,
+  streamOpenRouterChat,
+  summarizeOpenRouterMemory,
+} from './services/openrouter';
+import {
   loadActiveConversationId,
   loadActivePersonaId,
   loadConversations,
   loadMemories,
   loadOllamaUrl,
   loadPersonas,
+  loadProvider,
   loadSelectedModel,
+  loadSelectedOpenRouterModel,
   loadTheme,
   saveActiveConversationId,
   saveActivePersonaId,
@@ -31,13 +41,17 @@ import {
   saveMemories,
   saveOllamaUrl,
   savePersonas,
+  saveProvider,
   saveSelectedModel,
+  saveSelectedOpenRouterModel,
   saveTheme,
 } from './services/storage';
 import {
   ChatMessage,
   Conversation,
+  ModelProvider,
   OllamaModel,
+  OpenRouterModel,
   Persona,
   PersonaMemory,
   ThemeMode,
@@ -59,10 +73,24 @@ function deriveConversationTitle(firstMessage: string): string {
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
   const [ollamaUrl, setOllamaUrl] = useState<string>(() => loadOllamaUrl());
-  const [models, setModels] = useState<OllamaModel[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>(() => loadSelectedModel());
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [activeProvider, setActiveProvider] = useState<ModelProvider>(() => loadProvider());
+
+  // Ollama state
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>(() =>
+    loadSelectedModel()
+  );
+  const [ollamaLoading, setOllamaLoading] = useState(false);
+  const [ollamaError, setOllamaError] = useState<string | null>(null);
+
+  // OpenRouter free models state
+  const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([]);
+  const [selectedOpenRouterModel, setSelectedOpenRouterModel] = useState<string>(() =>
+    loadSelectedOpenRouterModel()
+  );
+  const [openRouterLoading, setOpenRouterLoading] = useState(false);
+  const [openRouterError, setOpenRouterError] = useState<string | null>(null);
+  const [openRouterConfigured, setOpenRouterConfigured] = useState(true);
 
   const [personas, setPersonas] = useState<Persona[]>(() => loadPersonas());
   const [memories, setMemories] = useState<PersonaMemory[]>(() => loadMemories());
@@ -84,6 +112,10 @@ export default function App() {
   const [chatError, setChatError] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const chatAreaRef = useRef<ChatAreaHandle | null>(null);
+
+  const selectedModel =
+    activeProvider === 'openrouter' ? selectedOpenRouterModel : selectedOllamaModel;
 
   // Sync theme class on <html>
   useEffect(() => {
@@ -102,8 +134,16 @@ export default function App() {
   }, [ollamaUrl]);
 
   useEffect(() => {
-    saveSelectedModel(selectedModel);
-  }, [selectedModel]);
+    saveProvider(activeProvider);
+  }, [activeProvider]);
+
+  useEffect(() => {
+    saveSelectedModel(selectedOllamaModel);
+  }, [selectedOllamaModel]);
+
+  useEffect(() => {
+    saveSelectedOpenRouterModel(selectedOpenRouterModel);
+  }, [selectedOpenRouterModel]);
 
   useEffect(() => {
     savePersonas(personas);
@@ -142,14 +182,14 @@ export default function App() {
   }, [conversations, activeConversationId]);
 
   // Fetch local Ollama models
-  const refreshModels = useCallback(async (targetUrl: string) => {
-    setModelsLoading(true);
-    setModelsError(null);
+  const refreshOllamaModels = useCallback(async (targetUrl: string) => {
+    setOllamaLoading(true);
+    setOllamaError(null);
     try {
       const fetched = await fetchOllamaModels(targetUrl);
-      setModels(fetched);
+      setOllamaModels(fetched);
       if (fetched.length > 0) {
-        setSelectedModel((current) => {
+        setSelectedOllamaModel((current) => {
           if (current && fetched.some((m) => m.name === current)) {
             return current;
           }
@@ -157,15 +197,42 @@ export default function App() {
         });
       }
     } catch (err) {
-      setModelsError(formatOllamaError(err, targetUrl));
+      setOllamaError(formatOllamaError(err, targetUrl));
     } finally {
-      setModelsLoading(false);
+      setOllamaLoading(false);
+    }
+  }, []);
+
+  // Fetch free OpenRouter models via local server proxy
+  const refreshOpenRouterModels = useCallback(async () => {
+    setOpenRouterLoading(true);
+    setOpenRouterError(null);
+    try {
+      const { models, configured } = await fetchOpenRouterModels();
+      setOpenRouterModels(models);
+      setOpenRouterConfigured(configured);
+      if (models.length > 0) {
+        setSelectedOpenRouterModel((current) => {
+          if (current && models.some((m) => m.id === current)) {
+            return current;
+          }
+          return models[0].id;
+        });
+      }
+    } catch (err) {
+      setOpenRouterError(formatOpenRouterError(err));
+    } finally {
+      setOpenRouterLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    refreshModels(ollamaUrl);
-  }, [ollamaUrl, refreshModels]);
+    refreshOllamaModels(ollamaUrl);
+  }, [ollamaUrl, refreshOllamaModels]);
+
+  useEffect(() => {
+    refreshOpenRouterModels();
+  }, [refreshOpenRouterModels]);
 
   const handleToggleTheme = () => {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
@@ -194,9 +261,55 @@ export default function App() {
       if (personas.some((p) => p.id === conv.personaId)) {
         setActivePersonaId(conv.personaId);
       }
+      const convProvider: ModelProvider =
+        conv.provider === 'openrouter' ? 'openrouter' : 'ollama';
+      setActiveProvider(convProvider);
       if (conv.model) {
-        setSelectedModel(conv.model);
+        if (convProvider === 'openrouter') {
+          setSelectedOpenRouterModel(conv.model);
+        } else {
+          setSelectedOllamaModel(conv.model);
+        }
       }
+    }
+  };
+
+  const handleSelectProvider = (provider: ModelProvider) => {
+    setActiveProvider(provider);
+    setChatError(null);
+    if (activeConversationId) {
+      const modelForProvider =
+        provider === 'openrouter'
+          ? selectedOpenRouterModel || openRouterModels[0]?.id || ''
+          : selectedOllamaModel || ollamaModels[0]?.name || '';
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversationId
+            ? {
+                ...c,
+                provider,
+                ...(modelForProvider ? { model: modelForProvider } : {}),
+              }
+            : c
+        )
+      );
+    }
+  };
+
+  const handleSelectModel = (provider: ModelProvider, model: string) => {
+    setActiveProvider(provider);
+    setChatError(null);
+    if (provider === 'openrouter') {
+      setSelectedOpenRouterModel(model);
+    } else {
+      setSelectedOllamaModel(model);
+    }
+    if (activeConversationId) {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversationId ? { ...c, provider, model } : c
+        )
+      );
     }
   };
 
@@ -234,6 +347,7 @@ export default function App() {
   const executeChatCompletion = async (
     conversationId: string,
     historyMessages: ChatMessage[],
+    providerToUse: ModelProvider,
     modelToUse: string,
     personaToUse: Persona | undefined,
     scopedMemories: PersonaMemory[]
@@ -244,6 +358,7 @@ export default function App() {
       role: 'assistant',
       content: '',
       model: modelToUse,
+      provider: providerToUse,
       createdAt: Date.now(),
     };
 
@@ -253,6 +368,7 @@ export default function App() {
           ? {
               ...c,
               model: modelToUse,
+              provider: providerToUse,
               messages: [...historyMessages, placeholderAssistant],
               updatedAt: Date.now(),
             }
@@ -265,30 +381,42 @@ export default function App() {
     setIsGenerating(true);
     setChatError(null);
 
+    const onToken = (accumulated: string) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: accumulated } : m
+                ),
+                updatedAt: Date.now(),
+              }
+            : c
+        )
+      );
+    };
+
     try {
-      const fullReply = await streamOllamaChat({
-        baseUrl: ollamaUrl,
-        model: modelToUse,
-        persona: personaToUse,
-        personaMemories: scopedMemories,
-        messages: historyMessages,
-        signal: controller.signal,
-        onToken: (accumulated) => {
-          setConversations((prev) =>
-            prev.map((c) =>
-              c.id === conversationId
-                ? {
-                    ...c,
-                    messages: c.messages.map((m) =>
-                      m.id === assistantMsgId ? { ...m, content: accumulated } : m
-                    ),
-                    updatedAt: Date.now(),
-                  }
-                : c
-            )
-          );
-        },
-      });
+      const fullReply =
+        providerToUse === 'openrouter'
+          ? await streamOpenRouterChat({
+              model: modelToUse,
+              persona: personaToUse,
+              personaMemories: scopedMemories,
+              messages: historyMessages,
+              signal: controller.signal,
+              onToken,
+            })
+          : await streamOllamaChat({
+              baseUrl: ollamaUrl,
+              model: modelToUse,
+              persona: personaToUse,
+              personaMemories: scopedMemories,
+              messages: historyMessages,
+              signal: controller.signal,
+              onToken,
+            });
 
       if (!fullReply.trim()) {
         setConversations((prev) =>
@@ -305,7 +433,11 @@ export default function App() {
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
       if (!isAbort) {
-        setChatError(formatOllamaError(err, ollamaUrl));
+        setChatError(
+          providerToUse === 'openrouter'
+            ? formatOpenRouterError(err)
+            : formatOllamaError(err, ollamaUrl)
+        );
       }
       // Remove empty assistant placeholder if generation failed before any token
       setConversations((prev) =>
@@ -326,11 +458,20 @@ export default function App() {
     }
   };
 
+  const resolveActiveModel = (provider: ModelProvider): string => {
+    if (provider === 'openrouter') {
+      return selectedOpenRouterModel.trim() || openRouterModels[0]?.id || '';
+    }
+    return selectedOllamaModel.trim() || ollamaModels[0]?.name || '';
+  };
+
   const handleSendMessage = async (content: string) => {
-    const modelToUse = selectedModel.trim() || models[0]?.name || '';
+    const modelToUse = resolveActiveModel(activeProvider);
     if (!modelToUse) {
       setChatError(
-        `No Ollama model selected. Connect to Ollama at ${ollamaUrl} or enter a custom model tag in the model selector.`
+        activeProvider === 'openrouter'
+          ? 'No free OpenRouter model selected. Open the model selector to choose one.'
+          : `No Ollama model selected. Connect to Ollama at ${ollamaUrl} or enter a custom model tag in the model selector.`
       );
       return;
     }
@@ -353,6 +494,7 @@ export default function App() {
         title: deriveConversationTitle(content),
         personaId: activePersona?.id || activePersonaId,
         model: modelToUse,
+        provider: activeProvider,
         pinned: false,
         messages: [userMessage],
         createdAt: now,
@@ -379,6 +521,7 @@ export default function App() {
     await executeChatCompletion(
       targetConversationId,
       updatedMessages,
+      activeProvider,
       modelToUse,
       activePersona,
       activePersonaMemories
@@ -398,10 +541,16 @@ export default function App() {
     }
     if (msgs.length === 0) return;
 
-    const modelToUse = selectedModel.trim() || activeConversation.model || models[0]?.name || '';
+    const providerToUse = activeProvider;
+    const modelToUse =
+      resolveActiveModel(providerToUse) ||
+      (activeConversation.provider === providerToUse ? activeConversation.model : '');
+    if (!modelToUse) return;
+
     await executeChatCompletion(
       activeConversation.id,
       msgs,
+      providerToUse,
       modelToUse,
       activePersona,
       activePersonaMemories
@@ -413,9 +562,16 @@ export default function App() {
     if (!activeConversation || activeConversation.messages.length === 0 || !activePersona) {
       return;
     }
-    const modelToUse = selectedModel.trim() || activeConversation.model || models[0]?.name || '';
+    const providerToUse = activeProvider;
+    const modelToUse =
+      resolveActiveModel(providerToUse) ||
+      (activeConversation.provider === providerToUse ? activeConversation.model : '');
     if (!modelToUse) {
-      setChatError('Select an Ollama model before saving a memory.');
+      setChatError(
+        providerToUse === 'openrouter'
+          ? 'Select a free OpenRouter model before saving a memory.'
+          : 'Select an Ollama model before saving a memory.'
+      );
       return;
     }
 
@@ -424,12 +580,19 @@ export default function App() {
     setMemoryNotice(null);
 
     try {
-      const summary = await summarizeConversationMemory({
-        baseUrl: ollamaUrl,
-        model: modelToUse,
-        personaName: activePersona.name,
-        messages: activeConversation.messages,
-      });
+      const summary =
+        providerToUse === 'openrouter'
+          ? await summarizeOpenRouterMemory({
+              model: modelToUse,
+              personaName: activePersona.name,
+              messages: activeConversation.messages,
+            })
+          : await summarizeConversationMemory({
+              baseUrl: ollamaUrl,
+              model: modelToUse,
+              personaName: activePersona.name,
+              messages: activeConversation.messages,
+            });
 
       const now = Date.now();
       const newMemory: PersonaMemory = {
@@ -447,7 +610,11 @@ export default function App() {
       setMemoryNotice(`Saved memory to "${activePersona.name}".`);
       setTimeout(() => setMemorySavedRecently(false), 2200);
     } catch (err) {
-      setChatError(formatOllamaError(err, ollamaUrl));
+      setChatError(
+        providerToUse === 'openrouter'
+          ? formatOpenRouterError(err)
+          : formatOllamaError(err, ollamaUrl)
+      );
     } finally {
       setIsSummarizingMemory(false);
     }
@@ -507,10 +674,111 @@ export default function App() {
     setMemories((prev) => prev.filter((m) => m.id !== memoryId));
   };
 
+  const handleImportMemories = (
+    personaId: string,
+    importedMemories: PersonaMemory[]
+  ): { added: number; skipped: number } => {
+    const existingSummaries = new Set(
+      memories
+        .filter((m) => m.personaId === personaId)
+        .map((m) => m.summary.trim())
+    );
+
+    const toAdd: PersonaMemory[] = [];
+    let skipped = 0;
+
+    for (const mem of importedMemories) {
+      const normalizedSummary = mem.summary.trim();
+      if (!normalizedSummary || existingSummaries.has(normalizedSummary)) {
+        skipped += 1;
+        continue;
+      }
+      existingSummaries.add(normalizedSummary);
+      toAdd.push({
+        ...mem,
+        personaId,
+        summary: normalizedSummary,
+      });
+    }
+
+    if (toAdd.length > 0) {
+      setMemories((prev) => [...toAdd, ...prev]);
+    }
+
+    return { added: toAdd.length, skipped };
+  };
+
+  const handleImportPersonas = (
+    bundles: ImportedPersonaBundle[]
+  ): { importedPersonas: Persona[]; importedMemoriesCount: number } => {
+    const newPersonas = bundles.map((b) => b.persona);
+    const newMemories = bundles.flatMap((b) => b.memories);
+
+    setPersonas((prev) => [...prev, ...newPersonas]);
+    if (newMemories.length > 0) {
+      setMemories((prev) => [...newMemories, ...prev]);
+    }
+
+    return {
+      importedPersonas: newPersonas,
+      importedMemoriesCount: newMemories.length,
+    };
+  };
+
   const openPersonaModal = (initialId?: string) => {
     setPersonaModalInitialId(initialId);
     setPersonaModalOpen(true);
   };
+
+  useKeyboardShortcuts([
+    {
+      key: 'enter',
+      mod: true,
+      preventDefault: true,
+      handler: (event) => {
+        const target = event.target instanceof HTMLElement ? event.target : null;
+        const activeForm = target?.closest('form');
+        if (activeForm) {
+          activeForm.requestSubmit();
+          return;
+        }
+        if (personaModalOpen) {
+          const modalForm = document.querySelector<HTMLFormElement>('[role="dialog"] form');
+          modalForm?.requestSubmit();
+          return;
+        }
+        chatAreaRef.current?.submit();
+      },
+    },
+    {
+      key: 'n',
+      mod: true,
+      shift: false,
+      preventDefault: true,
+      handler: () => {
+        handleNewChat();
+        setPersonaModalOpen(false);
+        setSidebarOpen(false);
+        requestAnimationFrame(() => {
+          chatAreaRef.current?.focusInput();
+        });
+      },
+    },
+    {
+      key: 'p',
+      mod: true,
+      shift: false,
+      preventDefault: true,
+      handler: () => {
+        setPersonaModalOpen((prev) => {
+          if (!prev) {
+            setPersonaModalInitialId(activePersona?.id);
+          }
+          return !prev;
+        });
+      },
+    },
+  ]);
 
   return (
     <MotionConfig reducedMotion="user">
@@ -552,21 +820,21 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col">
           <Header
             onOpenSidebar={() => setSidebarOpen(true)}
-            models={models}
+            activeProvider={activeProvider}
+            onSelectProvider={handleSelectProvider}
             selectedModel={selectedModel}
-            onSelectModel={(model) => {
-              setSelectedModel(model);
-              if (activeConversationId) {
-                setConversations((prev) =>
-                  prev.map((c) => (c.id === activeConversationId ? { ...c, model } : c))
-                );
-              }
-            }}
-            modelsLoading={modelsLoading}
-            modelsError={modelsError}
-            onRefreshModels={() => refreshModels(ollamaUrl)}
+            onSelectModel={handleSelectModel}
+            ollamaModels={ollamaModels}
+            ollamaLoading={ollamaLoading}
+            ollamaError={ollamaError}
+            onRefreshOllama={() => refreshOllamaModels(ollamaUrl)}
             ollamaUrl={ollamaUrl}
             onChangeOllamaUrl={(url) => setOllamaUrl(url)}
+            openRouterModels={openRouterModels}
+            openRouterLoading={openRouterLoading}
+            openRouterError={openRouterError}
+            openRouterConfigured={openRouterConfigured}
+            onRefreshOpenRouter={refreshOpenRouterModels}
             personas={personas}
             activePersona={activePersona}
             activePersonaMemoryCount={activePersonaMemories.length}
@@ -584,10 +852,12 @@ export default function App() {
           />
 
           <ChatArea
+            ref={chatAreaRef}
             conversationKey={activeConversationId || '__new__'}
             messages={activeConversation?.messages || []}
             activePersona={activePersona}
             activePersonaMemoryCount={activePersonaMemories.length}
+            activeProvider={activeProvider}
             selectedModel={selectedModel}
             isGenerating={isGenerating}
             isSummarizingMemory={isSummarizingMemory}
@@ -616,6 +886,8 @@ export default function App() {
           onAddMemory={handleAddMemory}
           onUpdateMemory={handleUpdateMemory}
           onDeleteMemory={handleDeleteMemory}
+          onImportPersonas={handleImportPersonas}
+          onImportMemories={handleImportMemories}
         />
       </div>
     </MotionConfig>

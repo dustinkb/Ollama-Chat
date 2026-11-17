@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
@@ -11,14 +11,22 @@ import {
   Square,
   X,
 } from 'lucide-react';
-import { ChatMessage, Persona } from '../types/chat';
+import { getPrimaryModifierLabel } from '../hooks/useKeyboardShortcuts';
+import { ChatMessage, ModelProvider, Persona } from '../types/chat';
 import { MarkdownContent } from './MarkdownContent';
 
+export interface ChatAreaHandle {
+  submit: () => void;
+  focusInput: () => void;
+}
+
 interface ChatAreaProps {
+  ref?: React.Ref<ChatAreaHandle>;
   conversationKey: string;
   messages: ChatMessage[];
   activePersona: Persona | undefined;
   activePersonaMemoryCount: number;
+  activeProvider: ModelProvider;
   selectedModel: string;
   isGenerating: boolean;
   isSummarizingMemory: boolean;
@@ -37,10 +45,12 @@ function formatMessageTime(ts: number): string {
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
+  ref,
   conversationKey,
   messages,
   activePersona,
   activePersonaMemoryCount,
+  activeProvider,
   selectedModel,
   isGenerating,
   isSummarizingMemory,
@@ -56,6 +66,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [input, setInput] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
+  const modKey = getPrimaryModifierLabel();
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -127,9 +138,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
   }, [input]);
 
-  const handleSubmit = () => {
+  const handleSubmit = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed || isGenerating) return;
+    if (!trimmed || isGenerating || isSummarizingMemory) return;
     setPaused(false);
     onSendMessage(trimmed);
     setInput('');
@@ -137,10 +148,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       textareaRef.current.style.height = 'auto';
     }
     requestAnimationFrame(() => scrollToBottom('smooth'));
-  };
+  }, [input, isGenerating, isSummarizingMemory, onSendMessage, setPaused, scrollToBottom]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      submit: handleSubmit,
+      focusInput: () => {
+        textareaRef.current?.focus();
+      },
+    }),
+    [handleSubmit]
+  );
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // Plain Enter sends the message; Ctrl/Cmd+Enter is handled globally by the shortcut manager
+    if (
+      e.key === 'Enter' &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.nativeEvent.isComposing
+    ) {
       e.preventDefault();
       handleSubmit();
     }
@@ -242,7 +272,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
                 </p>
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-3 border-t border-zinc-200/80 pt-4 text-[12px] text-zinc-500 dark:border-white/[0.06]">
-                  <span className="font-mono">{selectedModel || 'No model selected'}</span>
+                  <span className="font-mono">
+                    {activeProvider === 'openrouter' ? 'OpenRouter (Free)' : 'Local Ollama'}
+                    {selectedModel ? ` · ${selectedModel}` : ' · No model selected'}
+                  </span>
                   <span aria-hidden="true">·</span>
                   <button
                     type="button"
@@ -413,6 +446,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               placeholder={
                 selectedModel
                   ? `Message ${selectedModel}...`
+                  : activeProvider === 'openrouter'
+                  ? 'Select a free OpenRouter model above to start...'
                   : 'Select an Ollama model above to start...'
               }
               rows={1}
@@ -443,7 +478,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             )}
           </div>
           <div className="mt-1.5 hidden items-center justify-between px-1 text-[11px] text-zinc-400 dark:text-zinc-600 sm:flex">
-            <span>Enter to send · Shift+Enter for newline</span>
+            <span>
+              {modKey}+Enter to send · Shift+Enter newline · {modKey}+N new · {modKey}+P personas
+            </span>
             <span>
               {activePersona?.name || 'Default'}
               {activePersonaMemoryCount > 0 && ` · ${activePersonaMemoryCount} memories active`}

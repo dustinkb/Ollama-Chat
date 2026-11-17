@@ -1,6 +1,24 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Bookmark, Check, Pencil, Plus, Trash2, X } from 'lucide-react';
+import {
+  AlertCircle,
+  Bookmark,
+  Check,
+  Download,
+  Pencil,
+  Plus,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import {
+  exportAllPersonasAsJson,
+  exportPersonaAsJson,
+  exportPersonaMemoriesAsJson,
+  ImportedPersonaBundle,
+  parseMemoriesImport,
+  parsePersonasImport,
+} from '../services/export';
 import { Persona, PersonaMemory } from '../types/chat';
 
 interface PersonaModalProps {
@@ -17,6 +35,19 @@ interface PersonaModalProps {
   onAddMemory: (personaId: string, summary: string) => void;
   onUpdateMemory: (memoryId: string, summary: string) => void;
   onDeleteMemory: (memoryId: string) => void;
+  onImportPersonas: (bundles: ImportedPersonaBundle[]) => {
+    importedPersonas: Persona[];
+    importedMemoriesCount: number;
+  };
+  onImportMemories: (
+    personaId: string,
+    importedMemories: PersonaMemory[]
+  ) => { added: number; skipped: number };
+}
+
+interface TransferNotice {
+  type: 'success' | 'error';
+  message: string;
 }
 
 export const PersonaModal: React.FC<PersonaModalProps> = ({
@@ -33,6 +64,8 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
   onAddMemory,
   onUpdateMemory,
   onDeleteMemory,
+  onImportPersonas,
+  onImportMemories,
 }) => {
   const [selectedId, setSelectedId] = useState<string>(activePersonaId);
   const [isCreatingNew, setIsCreatingNew] = useState(false);
@@ -45,6 +78,13 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
   const [showAddMemory, setShowAddMemory] = useState(false);
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
   const [editingMemoryText, setEditingMemoryText] = useState('');
+
+  // Import/Export status notice
+  const [transferNotice, setTransferNotice] = useState<TransferNotice | null>(null);
+
+  const personaFileInputRef = useRef<HTMLInputElement>(null);
+  const memoryFileInputRef = useRef<HTMLInputElement>(null);
+  const personaFormRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -65,6 +105,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
     setEditingMemoryId(null);
     setShowAddMemory(false);
     setNewMemoryDraft('');
+    setTransferNotice(null);
   }, [isOpen, initialPersonaId, activePersonaId, personas]);
 
   const selectedPersona = useMemo(
@@ -87,6 +128,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
     setPromptDraft(persona.systemPrompt);
     setEditingMemoryId(null);
     setShowAddMemory(false);
+    setTransferNotice(null);
   };
 
   const handleStartNew = () => {
@@ -95,6 +137,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
     setPromptDraft('');
     setEditingMemoryId(null);
     setShowAddMemory(false);
+    setTransferNotice(null);
   };
 
   const handleSavePersona = (e: React.FormEvent) => {
@@ -132,6 +175,107 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
     setEditingMemoryId(null);
   };
 
+  const handleExportAllPersonas = () => {
+    exportAllPersonasAsJson(personas, memories);
+    setTransferNotice({
+      type: 'success',
+      message: `Exported ${personas.length} ${personas.length === 1 ? 'persona' : 'personas'} and coupled memories.`,
+    });
+  };
+
+  const handleExportSinglePersona = () => {
+    if (!selectedPersona) return;
+    exportPersonaAsJson(selectedPersona, memories);
+    setTransferNotice({
+      type: 'success',
+      message: `Exported "${selectedPersona.name}" (${personaMemories.length} ${
+        personaMemories.length === 1 ? 'memory' : 'memories'
+      }).`,
+    });
+  };
+
+  const handleExportMemories = () => {
+    if (!selectedPersona || personaMemories.length === 0) return;
+    exportPersonaMemoriesAsJson(selectedPersona, memories);
+    setTransferNotice({
+      type: 'success',
+      message: `Exported ${personaMemories.length} ${
+        personaMemories.length === 1 ? 'memory' : 'memories'
+      } for "${selectedPersona.name}".`,
+    });
+  };
+
+  const handlePersonaFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const bundles = parsePersonasImport(text);
+      const { importedPersonas, importedMemoriesCount } = onImportPersonas(bundles);
+
+      if (importedPersonas[0]) {
+        setIsCreatingNew(false);
+        setSelectedId(importedPersonas[0].id);
+        setNameDraft(importedPersonas[0].name);
+        setPromptDraft(importedPersonas[0].systemPrompt);
+      }
+
+      const memSuffix =
+        importedMemoriesCount > 0
+          ? ` with ${importedMemoriesCount} ${
+              importedMemoriesCount === 1 ? 'memory' : 'memories'
+            }`
+          : '';
+      setTransferNotice({
+        type: 'success',
+        message: `Imported ${importedPersonas.length} ${
+          importedPersonas.length === 1 ? 'persona' : 'personas'
+        }${memSuffix}.`,
+      });
+    } catch (err) {
+      setTransferNotice({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to import personas.',
+      });
+    }
+  };
+
+  const handleMemoryFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !selectedPersona) return;
+
+    try {
+      const text = await file.text();
+      const parsed = parseMemoriesImport(text, selectedPersona.id);
+      const { added, skipped } = onImportMemories(selectedPersona.id, parsed);
+
+      if (added === 0 && skipped > 0) {
+        setTransferNotice({
+          type: 'success',
+          message: `All ${skipped} ${
+            skipped === 1 ? 'memory was' : 'memories were'
+          } already present for "${selectedPersona.name}".`,
+        });
+      } else {
+        const skippedNote = skipped > 0 ? ` (${skipped} duplicate skipped)` : '';
+        setTransferNotice({
+          type: 'success',
+          message: `Imported ${added} ${added === 1 ? 'memory' : 'memories'} to "${
+            selectedPersona.name
+          }"${skippedNote}.`,
+        });
+      }
+    } catch (err) {
+      setTransferNotice({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Failed to import memories.',
+      });
+    }
+  };
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -154,6 +298,24 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
             aria-modal="true"
             aria-label="Personas and Persona Memories"
           >
+            {/* Hidden file inputs for JSON import */}
+            <input
+              ref={personaFileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handlePersonaFileChange}
+              className="hidden"
+              aria-hidden="true"
+            />
+            <input
+              ref={memoryFileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleMemoryFileChange}
+              className="hidden"
+              aria-hidden="true"
+            />
+
             {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-zinc-200/80 px-5 py-4 dark:border-white/[0.07]">
               <div>
@@ -181,7 +343,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                 <button
                   type="button"
                   onClick={handleStartNew}
-                  className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-gradient-to-b from-white to-zinc-50 px-3 py-2 text-[12.5px] font-medium text-zinc-900 shadow-xs transition-all duration-200 ease-in-out hover:border-zinc-300 active:scale-[0.98] dark:border-white/[0.09] dark:bg-gradient-to-b dark:from-[#16161B] dark:to-[#0E0E12] dark:text-zinc-100 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] dark:hover:border-white/[0.16]"
+                  className="mb-2.5 flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-gradient-to-b from-white to-zinc-50 px-3 py-2 text-[12.5px] font-medium text-zinc-900 shadow-xs transition-all duration-200 ease-in-out hover:border-zinc-300 active:scale-[0.98] dark:border-white/[0.09] dark:bg-gradient-to-b dark:from-[#16161B] dark:to-[#0E0E12] dark:text-zinc-100 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] dark:hover:border-white/[0.16]"
                 >
                   <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
                   <span>New persona</span>
@@ -215,17 +377,74 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                     );
                   })}
                 </div>
+
+                {/* Personas Import / Export Footer */}
+                <div className="mt-2.5 grid grid-cols-2 gap-1.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/[0.07]">
+                  <button
+                    type="button"
+                    onClick={() => personaFileInputRef.current?.click()}
+                    title="Import personas (and coupled memories) from JSON"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.97] dark:border-white/[0.09] dark:bg-[#141418] dark:text-zinc-300 dark:hover:bg-[#1C1C22] dark:hover:text-zinc-100"
+                  >
+                    <Upload className="h-3 w-3" strokeWidth={1.6} />
+                    <span>Import</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportAllPersonas}
+                    disabled={personas.length === 0}
+                    title="Export all personas and their memories as JSON"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200/90 bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/[0.09] dark:bg-[#141418] dark:text-zinc-300 dark:hover:bg-[#1C1C22] dark:hover:text-zinc-100"
+                  >
+                    <Download className="h-3 w-3" strokeWidth={1.6} />
+                    <span>Export all</span>
+                  </button>
+                </div>
               </div>
 
               {/* Right Editor & Scoped Memories */}
               <div className="flex-1 overflow-y-auto p-5 sm:p-6">
-                <form onSubmit={handleSavePersona} className="space-y-4">
+                {/* Inline Import/Export Status Notice */}
+                <AnimatePresence>
+                  {transferNotice && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.18 }}
+                      className={`mb-4 flex items-center justify-between gap-2.5 rounded-xl border px-3.5 py-2.5 text-[12px] ${
+                        transferNotice.type === 'error'
+                          ? 'border-red-300/80 bg-red-50/80 text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300'
+                          : 'border-emerald-300/80 bg-emerald-50/80 text-emerald-800 dark:border-emerald-500/25 dark:bg-emerald-950/25 dark:text-emerald-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        {transferNotice.type === 'error' ? (
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                        ) : (
+                          <Check className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                        )}
+                        <span>{transferNotice.message}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTransferNotice(null)}
+                        className="rounded-lg p-0.5 opacity-70 transition-opacity hover:opacity-100"
+                        aria-label="Dismiss notice"
+                      >
+                        <X className="h-3.5 w-3.5" strokeWidth={1.6} />
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                <form ref={personaFormRef} onSubmit={handleSavePersona} className="space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-[13.5px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {isCreatingNew ? 'Create Persona' : 'Persona Configuration'}
                     </h3>
                     {!isCreatingNew && selectedPersona && (
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         {selectedPersona.id !== activePersonaId ? (
                           <button
                             type="button"
@@ -235,10 +454,19 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                             Set as active
                           </button>
                         ) : (
-                          <span className="text-[12px] font-medium text-blue-600 dark:text-[#7AA2F7]">
+                          <span className="px-1 text-[12px] font-medium text-blue-600 dark:text-[#7AA2F7]">
                             Currently active
                           </span>
                         )}
+                        <button
+                          type="button"
+                          onClick={handleExportSinglePersona}
+                          title="Export this persona and its memories as JSON"
+                          className="inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white px-2.5 py-1 text-[12px] text-zinc-600 shadow-2xs transition-all duration-200 hover:bg-zinc-50 hover:text-zinc-950 active:scale-[0.97] dark:border-white/[0.09] dark:bg-[#16161B] dark:text-zinc-300 dark:hover:bg-[#1D1D24] dark:hover:text-zinc-100"
+                        >
+                          <Download className="h-3 w-3" strokeWidth={1.6} />
+                          <span>Export</span>
+                        </button>
                         {personas.length > 1 && (
                           <button
                             type="button"
@@ -264,7 +492,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                       onChange={(e) => setNameDraft(e.target.value)}
                       placeholder="e.g. Systems Architect, Writing Editor"
                       required
-                      className="w-full rounded-xl border border-zinc-200/90 bg-zinc-50/70 px-3.5 py-2 text-[13.5px] text-zinc-950 shadow-2xs placeholder:text-zinc-400 transition-all duration-200 focus:border-blue-500/50 focus:bg-white focus:outline-none dark:border-white/[0.09] dark:bg-black/70 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-[#7AA2F7]/50"
+                      className="w-full rounded-xl border border-zinc-200/90 bg-zinc-50/70 px-3.5 py-2 text-[13.5px] text-zinc-950 shadow-2xs placeholder:text-zinc-400 transition-all duration-200 focus:border-blue-500/50 focus:bg-white focus:outline-none dark:border-white/[0.09] dark:bg-black/70 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-[#7AA2F7]/50 dark:focus:bg-[#101014]"
                     />
                   </div>
 
@@ -277,7 +505,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                       onChange={(e) => setPromptDraft(e.target.value)}
                       rows={5}
                       placeholder="Instructions sent at the start of every conversation using this persona..."
-                      className="w-full rounded-xl border border-zinc-200/90 bg-zinc-50/70 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-zinc-950 shadow-2xs placeholder:text-zinc-400 transition-all duration-200 focus:border-blue-500/50 focus:bg-white focus:outline-none dark:border-white/[0.09] dark:bg-black/70 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-[#7AA2F7]/50"
+                      className="w-full rounded-xl border border-zinc-200/90 bg-zinc-50/70 px-3.5 py-2.5 text-[13.5px] leading-relaxed text-zinc-950 shadow-2xs placeholder:text-zinc-400 transition-all duration-200 focus:border-blue-500/50 focus:bg-white focus:outline-none dark:border-white/[0.09] dark:bg-black/70 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-[#7AA2F7]/50 dark:focus:bg-[#101014]"
                     />
                   </div>
 
@@ -300,7 +528,7 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                 {/* Persona-Coupled Memories Section */}
                 {!isCreatingNew && selectedPersona && (
                   <div className="mt-7 border-t border-zinc-200/80 pt-5 dark:border-white/[0.07]">
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5">
                       <div>
                         <h4 className="flex items-center gap-2 text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
                           <Bookmark className="h-3.5 w-3.5 text-zinc-500" strokeWidth={1.5} />
@@ -313,14 +541,35 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                           Injected automatically only when {selectedPersona.name} is active.
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowAddMemory((v) => !v)}
-                        className="inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white px-3 py-1.5 text-[12px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-50 active:scale-[0.97] dark:border-white/[0.09] dark:bg-[#151519] dark:text-zinc-300 dark:hover:bg-[#1D1D23]"
-                      >
-                        <Plus className="h-3 w-3" strokeWidth={1.75} />
-                        <span>Add note</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => memoryFileInputRef.current?.click()}
+                          title={`Import memories from JSON into "${selectedPersona.name}"`}
+                          className="inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-50 active:scale-[0.97] dark:border-white/[0.09] dark:bg-[#151519] dark:text-zinc-300 dark:hover:bg-[#1D1D23]"
+                        >
+                          <Upload className="h-3 w-3" strokeWidth={1.6} />
+                          <span>Import</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleExportMemories}
+                          disabled={personaMemories.length === 0}
+                          title={`Export memories for "${selectedPersona.name}" as JSON`}
+                          className="inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-50 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/[0.09] dark:bg-[#151519] dark:text-zinc-300 dark:hover:bg-[#1D1D23]"
+                        >
+                          <Download className="h-3 w-3" strokeWidth={1.6} />
+                          <span>Export</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAddMemory((v) => !v)}
+                          className="inline-flex items-center gap-1 rounded-xl border border-zinc-200/90 bg-white px-3 py-1.5 text-[11.5px] font-medium text-zinc-700 shadow-2xs transition-all duration-200 hover:bg-zinc-50 active:scale-[0.97] dark:border-white/[0.09] dark:bg-[#151519] dark:text-zinc-300 dark:hover:bg-[#1D1D23]"
+                        >
+                          <Plus className="h-3 w-3" strokeWidth={1.75} />
+                          <span>Add note</span>
+                        </button>
+                      </div>
                     </div>
 
                     <AnimatePresence>
@@ -335,9 +584,16 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                           <textarea
                             value={newMemoryDraft}
                             onChange={(e) => setNewMemoryDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleSaveNewMemory();
+                              }
+                            }}
                             rows={3}
                             placeholder="Write a concise bullet point or durable fact for this persona..."
-                            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[13px] leading-relaxed text-zinc-900 focus:border-blue-500/50 focus:outline-none dark:border-white/[0.08] dark:bg-[#0D0D11] dark:text-zinc-100"
+                            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[13px] leading-relaxed text-zinc-900 focus:border-blue-500/50 focus:outline-none dark:border-white/[0.08] dark:bg-[#0D0D11] dark:text-zinc-100 dark:focus:border-[#7AA2F7]/50 dark:focus:bg-[#101014]"
                           />
                           <div className="mt-2.5 flex justify-end gap-2">
                             <button
@@ -366,7 +622,8 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                       <div className="mt-4 rounded-xl border border-dashed border-zinc-200 px-4 py-6 text-center dark:border-white/[0.08]">
                         <p className="text-[12.5px] text-zinc-500">
                           No saved memories for {selectedPersona.name} yet. Click the bookmark icon in
-                          the chat header to summarize a conversation into memory.
+                          the chat header to summarize a conversation into memory, or import a JSON
+                          memory file.
                         </p>
                       </div>
                     ) : (
@@ -383,8 +640,15 @@ export const PersonaModal: React.FC<PersonaModalProps> = ({
                                   <textarea
                                     value={editingMemoryText}
                                     onChange={(e) => setEditingMemoryText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        handleSaveMemoryEdit(mem.id);
+                                      }
+                                    }}
                                     rows={4}
-                                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[13px] leading-relaxed text-zinc-900 focus:border-blue-500/50 focus:outline-none dark:border-white/[0.08] dark:bg-black dark:text-zinc-100"
+                                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[13px] leading-relaxed text-zinc-900 focus:border-blue-500/50 focus:outline-none dark:border-white/[0.08] dark:bg-black dark:text-zinc-100 dark:focus:border-[#7AA2F7]/50 dark:focus:bg-[#101014]"
                                   />
                                   <div className="flex justify-end gap-2">
                                     <button

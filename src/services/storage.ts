@@ -1,9 +1,11 @@
-import { Conversation, Persona, PersonaMemory, ThemeMode } from '../types/chat';
+import { Conversation, ModelProvider, Persona, PersonaMemory, ThemeMode } from '../types/chat';
 
 const STORAGE_KEYS = {
   THEME: 'voidchat_theme_v1',
   OLLAMA_URL: 'voidchat_ollama_url_v1',
+  ACTIVE_PROVIDER: 'voidchat_active_provider_v1',
   SELECTED_MODEL: 'voidchat_selected_model_v1',
+  SELECTED_OPENROUTER_MODEL: 'voidchat_selected_openrouter_model_v1',
   ACTIVE_PERSONA_ID: 'voidchat_active_persona_id_v1',
   ACTIVE_CONVERSATION_ID: 'voidchat_active_conversation_id_v1',
   PERSONAS: 'voidchat_personas_v1',
@@ -84,6 +86,23 @@ export function saveOllamaUrl(url: string): void {
   }
 }
 
+export function loadProvider(): ModelProvider {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.ACTIVE_PROVIDER);
+    return saved === 'openrouter' ? 'openrouter' : 'ollama';
+  } catch {
+    return 'ollama';
+  }
+}
+
+export function saveProvider(provider: ModelProvider): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_PROVIDER, provider);
+  } catch {
+    // Ignore
+  }
+}
+
 export function loadSelectedModel(): string {
   try {
     return localStorage.getItem(STORAGE_KEYS.SELECTED_MODEL) || '';
@@ -95,6 +114,22 @@ export function loadSelectedModel(): string {
 export function saveSelectedModel(model: string): void {
   try {
     localStorage.setItem(STORAGE_KEYS.SELECTED_MODEL, model);
+  } catch {
+    // Ignore
+  }
+}
+
+export function loadSelectedOpenRouterModel(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.SELECTED_OPENROUTER_MODEL) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveSelectedOpenRouterModel(model: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.SELECTED_OPENROUTER_MODEL, model);
   } catch {
     // Ignore
   }
